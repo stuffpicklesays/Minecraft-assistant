@@ -1,20 +1,32 @@
+import sys
+
+# Open a log file
+log_file = open("bot_error.log", "w", encoding="utf-8")
+
+# Redirect standard error (where exceptions print)
+sys.stderr = log_file
+sys.stdout = log_file
+
 from javascript import require, On
 import time
 import math
 import threading
 
 mineflayer = require('mineflayer')
-mcData = require('minecraft-data')('1.21')
+mcData = require('minecraft-data')('1.20.2')
 
 
 RANGE_GOAL = 1
-BOT_USERNAME = 'python'
+BOT_USERNAME = 'BarryTheBot'
 
 bot = mineflayer.createBot({
   'host': '192.168.1.125',
-  'port': 25564,
-  'username': BOT_USERNAME
+  'port': 25565,
+  'username': BOT_USERNAME,
+  'version': '1.20.2'
 })
+
+
 
 pathfinder_pkg = require('mineflayer-pathfinder')
 
@@ -24,6 +36,8 @@ GoalNear = pathfinder_pkg.goals.GoalNear
 bot.loadPlugin(pathfinder)
 
 Vec3 = require('vec3').Vec3
+
+
 
 print("Started mineflayer")
 def mine(bot,block):
@@ -50,6 +64,37 @@ def mine(bot,block):
         bot.dig(block)
     except Exception as e:
         print(f"Error: {e}")
+
+def find_chest(bot):
+    mcData = require('minecraft-data')(bot.version)
+    chest_id = mcData.blocksByName['chest'].id
+    bot_pos = bot.entity.position
+    chest_blocks = bot.findBlocks({
+        'matching': chest_id,
+        'maxDistance': 32,
+        'count': 100 
+    })
+    
+    if not chest_blocks:
+        print("No chest found.") 
+        return None
+
+    chest_with_dist = []
+    for pos in chest_blocks:
+        block = bot.blockAt(pos)
+        t = block.position
+        dist = math.sqrt((bot_pos.x - t.x)**2 + (bot_pos.y - t.y)**2 + (bot_pos.z - t.z)**2)
+        chest_with_dist.append((dist, block))
+
+    chest_with_dist.sort(key=lambda x: x[0])
+
+    closest_chest = chest_with_dist[0][1]
+    return closest_chest
+
+
+
+
+
 is_farming = False
 def farming_thread(bot):
     """
@@ -62,7 +107,6 @@ def farming_thread(bot):
     while is_farming:
         count += 1
         if count % 5 == 0:
-            bot.chat(f"Picking up farm drops...")
             pickup_farm_drops(bot)
         # 1. Harvest
         wheat_block = find_grown_wheat(bot)
@@ -145,7 +189,6 @@ def pickup_farm_drops(bot):
                 
             bot.pathfinder.setGoal(None) # Stop moving
     # Return to starting position
-    bot.chat("Returning to starting position...")
     goal = GoalNear(starting_pos.x, starting_pos.y, starting_pos.z, 1)
     bot.pathfinder.setGoal(goal)
     p = bot.entity.position
@@ -186,19 +229,30 @@ def stop_farming(bot):
 
 
 def replant(bot):
-    retries = 0
-    while not getattr(bot, "inventory", None):
-        if retries > 10:
-            print("Inventory never loaded. Skipping replant.")
-            return False
-        if getattr(bot, "inventory", None):
-            break
-        time.sleep(0.5)
-        retries += 1
-    if not getattr(bot, "inventory", None): 
-        bot.chat("Inventory not ready"); return
-    seeds = bot.inventory.findInventoryItem(mcData.itemsByName['wheat_seeds'].id)
-    bot.equip(seeds, 'hand')
+    mcData = require('minecraft-data')(bot.version)
+    
+    # 1. Robust Inventory Access with Retries
+    # We try to access inventory up to 5 times before giving up
+    seeds = None
+    for attempt in range(5):
+        try:
+            # Explicitly check if inventory exists before calling methods
+            if not bot.inventory:
+                raise Exception("Inventory not ready")
+                
+            seeds = bot.inventory.findInventoryItem(mcData.itemsByName['wheat_seeds'].id)
+            break # Success!
+        except Exception as e:
+            print(f"Waiting for inventory... ({e})")
+            time.sleep(1)
+            
+    if not seeds:
+        #print("No seeds found or inventory error.")
+        return False
+    try:
+        bot.equip(seeds, 'hand')
+    except Exception:
+        pass 
     
     farmland_id = mcData.blocksByName['farmland'].id
     
