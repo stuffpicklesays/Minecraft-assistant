@@ -1,134 +1,73 @@
-import sys
-
-# Open a log file
-log_file = open("bot_error.log", "w", encoding="utf-8")
-
-# Redirect standard error (where exceptions print)
-sys.stderr = log_file
-sys.stdout = log_file
-
-from javascript import require, On
 import time
+from waiting import wait
 import math
-import threading
+from utils import mine
+from javascript import require
 
-mineflayer = require('mineflayer')
-mcData = require('minecraft-data')('1.20.2')
+pathfinder = require('mineflayer-pathfinder')
+GoalNear = pathfinder.goals.GoalNear
+Vec3 = require('vec3')
 
-
-RANGE_GOAL = 1
-BOT_USERNAME = 'BarryTheBot'
-
-bot = mineflayer.createBot({
-  'host': '192.168.1.125',
-  'port': 25565,
-  'username': BOT_USERNAME,
-  'version': '1.20.2'
-})
-
-
-
-pathfinder_pkg = require('mineflayer-pathfinder')
-
-pathfinder = pathfinder_pkg.pathfinder
-Movements = pathfinder_pkg.Movements
-GoalNear = pathfinder_pkg.goals.GoalNear
-bot.loadPlugin(pathfinder)
-
-Vec3 = require('vec3').Vec3
-
-
-
-print("Started mineflayer")
-def mine(bot,block):
-    p = bot.entity.position
-    t = block.position
-    dist = math.sqrt((p.x - t.x)**2 + (p.y - t.y)**2 + (p.z - t.z)**2)
-
-    if dist > 4.5:
-        goal = GoalNear(t.x, t.y, t.z, 3)
-        bot.pathfinder.setGoal(goal)
-        while True:
-            current_pos = bot.entity.position
-            if not current_pos:
-                time.sleep(0.1)
-                continue
-            current_dist = math.sqrt((current_pos.x - t.x)**2 + (current_pos.y - t.y)**2 + (current_pos.z - t.z)**2)
-            
-            if current_dist <= 4.5:
-                break
-            if not bot.pathfinder.isMoving():
-                bot.pathfinder.setGoal(goal)
-            time.sleep(0.5)
-    try:
-        bot.dig(block)
-    except Exception as e:
-        print(f"Error: {e}")
-
-def find_chest(bot):
-    mcData = require('minecraft-data')(bot.version)
-    chest_id = mcData.blocksByName['chest'].id
-    bot_pos = bot.entity.position
-    chest_blocks = bot.findBlocks({
-        'matching': chest_id,
-        'maxDistance': 32,
-        'count': 100 
-    })
-    
-    if not chest_blocks:
-        print("No chest found.") 
-        return None
-
-    chest_with_dist = []
-    for pos in chest_blocks:
-        block = bot.blockAt(pos)
-        t = block.position
-        dist = math.sqrt((bot_pos.x - t.x)**2 + (bot_pos.y - t.y)**2 + (bot_pos.z - t.z)**2)
-        chest_with_dist.append((dist, block))
-
-    chest_with_dist.sort(key=lambda x: x[0])
-
-    closest_chest = chest_with_dist[0][1]
-    return closest_chest
-
-
-
-
-
-is_farming = False
-def farming_thread(bot):
+def farming_thread(bot, stop_event):
     """
     This function runs in the background.
     It loops forever until is_farming becomes False.
     """
-    global is_farming
-    count = 0
+    global state
     
-    while is_farming:
+    # Wait for bot to be ready
+    mcData = require('minecraft-data')(bot.version)
+    wheat_seeds_id = mcData.itemsByName['wheat_seeds'].id
+    
+    # Wait for inventory to be ready
+    for i in range(10):
+        try:
+            if bot.inventory and bot.inventory.items():
+                break
+        except:
+            pass
+        time.sleep(0.5)
+    
+    count = 0
+    while stop_event.is_set() == False:
+        # Count wheat seeds properly
+        try:
+            wheat_amount = sum(item.count for item in bot.inventory.items() if item.type == wheat_seeds_id)
+        except Exception as e:
+            print(f"Error counting wheat seeds: {e}")
+            wheat_amount = 0
+
         count += 1
-        if count % 5 == 0:
-            pickup_farm_drops(bot)
-        # 1. Harvest
+        if count % 10 == 0:
+            pickup_farm_drops(bot, stop_event)
         wheat_block = find_grown_wheat(bot)
         if wheat_block:
             mine(bot, wheat_block)
-            time.sleep(0.1) # Wait for block to break
-        planted = replant(bot)
-        time.sleep(0.1) 
-        if not wheat_block and not planted:
-            stop_farming(bot)
-            bot.chat("No more crops to harvest or plant. Stopping farm loop.")
-        else:
-            time.sleep(0.2)
+            wait(0.1, stop_event)
+        planted = replant(bot, stop_event)
+        planted2 = replant(bot, stop_event)
+        planted3 = replant(bot, stop_event)
 
-def pickup_farm_drops(bot):
+        wait(0.1, stop_event) 
+        if not wheat_block and not (planted or planted2 or planted3):
+            bot.chat("No more crops to harvest or plant. Waiting 20 seconds...")
+            wait(20, stop_event)
+        else:
+            wait(0.2, stop_event)
+
+
+def pickup_farm_drops(bot,stop_event):
     starting_pos = bot.entity.position
     picked_up_ids = set()  # Track which entities we've already tried
     attempts = 0  # Safety counter
     max_attempts = 10  # Maximum iterations before giving up
+    max_time = 8
+    time_started = time.time()
+    global state
     while True:
-        if not is_farming:
-            return
+        if time.time() - time_started > max_time:
+            print("Pickup time exceeded max time, stopping.")
+            break
         entities = bot.entities
         dropped_candidates = []
         attempts += 1
@@ -165,7 +104,7 @@ def pickup_farm_drops(bot):
             p = item.position
             dist = math.sqrt((bot_pos.x - p.x)**2 + (bot_pos.y - p.y)**2 + (bot_pos.z - p.z)**2)
             
-            if dist < min_dist and dist < 10: # Only target items within 10 blocks
+            if dist < min_dist and dist < 4: # Only target items within 4 blocks
                 min_dist = dist
                 closest_drop = item
         if not closest_drop:
@@ -185,7 +124,7 @@ def pickup_farm_drops(bot):
                 if d < 1: # Close enough to pickup
                     break
                     
-                time.sleep(0.5)
+                wait(0.1, stop_event)
                 
             bot.pathfinder.setGoal(None) # Stop moving
     # Return to starting position
@@ -206,48 +145,26 @@ def pickup_farm_drops(bot):
                 
 
 
-def farm_loop(bot):
-    global is_farming
-    
-    # If already running, don't start another thread
-    if is_farming:
-        bot.chat("Already farming!")
-        return
-
-    is_farming = True
-    bot.chat("Starting farm loop...")
-    
-
-    t = threading.Thread(target=farming_thread, args=(bot,))
-    t.daemon = True
-    t.start()
-
-def stop_farming(bot):
-    global is_farming
-    is_farming = False
-    bot.chat("Stopping farm loop...")
 
 
-def replant(bot):
+
+def replant(bot,stop_event):
     mcData = require('minecraft-data')(bot.version)
-    
-    # 1. Robust Inventory Access with Retries
-    # We try to access inventory up to 5 times before giving up
+
     seeds = None
     for attempt in range(5):
         try:
-            # Explicitly check if inventory exists before calling methods
             if not bot.inventory:
                 raise Exception("Inventory not ready")
                 
             seeds = bot.inventory.findInventoryItem(mcData.itemsByName['wheat_seeds'].id)
-            break # Success!
+            break
         except Exception as e:
             print(f"Waiting for inventory... ({e})")
-            time.sleep(1)
+            wait(1, stop_event)
             
     if not seeds:
-        #print("No seeds found or inventory error.")
+        print("No seeds found or inventory error.")
         return False
     try:
         bot.equip(seeds, 'hand')
@@ -258,8 +175,8 @@ def replant(bot):
     
     found_blocks = bot.findBlocks({
         'matching': farmland_id,
-        'maxDistance': 32,
-        'count': 100
+        'maxDistance': 50,
+        'count': 500
     })
 
     target_block = None
@@ -270,6 +187,7 @@ def replant(bot):
             target_block = block
             break
     if not target_block:
+        print("No suitable farmland found for planting.")
         return
     p = bot.entity.position
     t = target_block.position
@@ -286,18 +204,19 @@ def replant(bot):
             current_pos = bot.entity.position
 
             if not current_pos:
-                time.sleep(0.1)
+                wait(0.1, stop_event)
                 continue
 
             current_dist = math.sqrt((current_pos.x - t.x)**2 + (current_pos.y - t.y)**2 + (current_pos.z - t.z)**2)
             
             if current_dist <= 4.5:
                 break
+                
 
             if not bot.pathfinder.isMoving():
                 bot.pathfinder.setGoal(goal)
             
-            time.sleep(0.5)
+            wait(0.5, stop_event)
     try:
         bot.placeBlock(target_block, Vec3(0, 1, 0))
         return True
@@ -340,25 +259,3 @@ def find_grown_wheat(bot):
     # 4. Return the block object from the closest tuple
     closest_wheat = wheat_with_dist[0][1]
     return closest_wheat
-
-
-@On(bot, 'spawn')
-def handle(*args):
-  print("I spawned 👋")
-  movements = pathfinder.Movements(bot)
-
-@On(bot, 'chat')
-def handleMsg(this, sender, message, *args):
-    print("Got message", sender, message)
-    if sender == BOT_USERNAME:
-        return
-    if message == "!farm":
-       bot.chat("Starting farming!")
-       replant(bot)
-    elif message == "!harvest":
-        farm_loop(bot)
-
-
-@On(bot, "end")
-def handle(*args):
-  print("Bot ended!", args)
